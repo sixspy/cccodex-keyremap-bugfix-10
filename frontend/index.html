@@ -53,6 +53,7 @@ createApp({
     const username=ref('admin'), password=ref('123456'), err=ref(''), actionErr=ref('');
     const leftTab=ref(0), rightTab=ref(0);
     const versions=ref([]), mappings=ref([]), formal=ref([]), conflicts=ref([]);
+    const register=ref([]), cards=ref([]), audit=ref([]), orphans=ref([]), inconsistent=ref(0);
     const oldKey=ref('OLD-B1');
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
@@ -80,6 +81,14 @@ createApp({
       formal.value=Array.isArray(f.items)?f.items:[];
       const c=await loadJson('/api/conflicts'); if(c===null) return;
       conflicts.value=Array.isArray(c.items)?c.items:[];
+      const rg=await loadJson('/api/register'); if(rg===null) return;
+      register.value=Array.isArray(rg.items)?rg.items:[];
+      const rc=await loadJson('/api/reconcile-cards'); if(rc===null) return;
+      cards.value=Array.isArray(rc.items)?rc.items:[]; inconsistent.value=rc.inconsistent||0;
+      const au=await loadJson('/api/audit'); if(au===null) return;
+      audit.value=Array.isArray(au.items)?au.items:[];
+      const or=await loadJson('/api/orphans'); if(or===null) return;
+      orphans.value=Array.isArray(or.items)?or.items:[];
     }
     async function doRemap(){
       actionErr.value='';
@@ -87,8 +96,19 @@ createApp({
       const j=await r.json(); actionErr.value=r.ok?('正式键 '+j.entity_key):(j.detail||'失败');
       await refresh();
     }
+    async function doRevoke(){
+      actionErr.value='';
+      const r=await fetch('/api/revoke',{method:'POST',headers:auth(),body:JSON.stringify({old_key:oldKey.value})});
+      const j=await r.json();
+      if(r.ok) actionErr.value='已撤映 '+j.old_key+' → 迁入冲突待处置';
+      else if(j.contended) actionErr.value='撤映争用：'+j.detail;
+      else actionErr.value=j.detail||'撤映失败';
+      await refresh();
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap};
+    return {token,user,username,password,err,actionErr,leftTab,rightTab,
+            versions,mappings,formal,conflicts,register,cards,audit,orphans,inconsistent,
+            oldKey,login,logout,doRemap,doRevoke};
   },
   template:`
   <div v-if="!token" class="login">
@@ -121,7 +141,13 @@ createApp({
           <label>old_key</label>
           <input v-model="oldKey"/>
           <button class="primary" @click="doRemap">重映入正式区</button>
+          <button class="ghost" style="width:100%;margin-top:8px" @click="doRevoke">撤映（迁冲突待处置）</button>
           <div class="err">{{actionErr}}</div>
+        </div>
+        <div class="box">
+          <h2>映射册 <span class="pill">撤映后仍在册</span></h2>
+          <table><thead><tr><th>old</th><th>new</th><th>state</th></tr></thead>
+          <tbody><tr v-for="r in register" :key="r.id"><td>{{r.old_key}}</td><td class="ok">{{r.new_key}}</td><td :class="r.state==='已撤映'?'bad':'ok'">{{r.state}}</td></tr></tbody></table>
         </div>
       </div>
       <div class="bridge"></div>
@@ -129,6 +155,8 @@ createApp({
         <div class="tabs">
           <button :class="{on:rightTab===0}" @click="rightTab=0">正式区</button>
           <button :class="{on:rightTab===1}" @click="rightTab=1">冲突队列</button>
+          <button :class="{on:rightTab===2}" @click="rightTab=2">互证 / 审计</button>
+          <button :class="{on:rightTab===3}" @click="rightTab=3">孤儿</button>
         </div>
         <div class="box" v-show="rightTab===0">
           <h2>Formal Zone</h2>
@@ -139,6 +167,20 @@ createApp({
           <h2>Conflicts</h2>
           <table><thead><tr><th>old</th><th>reason</th><th>status</th></tr></thead>
           <tbody><tr v-for="c in conflicts" :key="c.id"><td class="bad">{{c.old_key}}</td><td>{{c.reason}}</td><td>{{c.status}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===2">
+          <h2>互证卡 <span class="pill" :class="inconsistent===0?'ok':'bad'">不一致 {{inconsistent}}</span></h2>
+          <table><thead><tr><th>old</th><th>formal</th><th>conflict</th><th>register</th><th>verdict</th></tr></thead>
+          <tbody><tr v-for="x in cards" :key="x.id"><td>{{x.old_key}}</td><td>{{x.formal_state}}</td><td>{{x.conflict_state}}</td><td>{{x.register_state}}</td><td :class="x.verdict==='一致'?'ok':'bad'">{{x.verdict}}</td></tr></tbody></table>
+          <h2 style="margin-top:14px">处置审计</h2>
+          <table><thead><tr><th>action</th><th>old</th><th>outcome</th><th>at</th></tr></thead>
+          <tbody><tr v-for="a in audit" :key="a.id"><td>{{a.action}}</td><td>{{a.old_key}}</td><td :class="a.outcome==='成功'?'ok':'bad'">{{a.outcome}}</td><td>{{a.at}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===3">
+          <h2>孤儿只读 <span class="pill" :class="orphans.length===0?'ok':'bad'">{{orphans.length}}</span></h2>
+          <p style="color:#9a9a9a;font-size:12px">在册但正式区与冲突区都找不到的登记行。数量应恒为 0。</p>
+          <table><thead><tr><th>old</th><th>new</th><th>state</th></tr></thead>
+          <tbody><tr v-for="o in orphans" :key="o.id"><td class="bad">{{o.old_key}}</td><td>{{o.new_key}}</td><td>{{o.state}}</td></tr></tbody></table>
         </div>
       </div>
     </div>
